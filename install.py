@@ -20,6 +20,7 @@ from pathlib import Path
 
 PLUGIN_NAME = "patlite"
 INSTALL_DIR = Path.home() / ".claude" / "plugins" / PLUGIN_NAME
+VENV_DIR = INSTALL_DIR / ".venv"
 SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 VENDOR_ID = 0x191A
 
@@ -81,6 +82,48 @@ def check_claude_config() -> None:
 
 # ── dependencies ───────────────────────────────────────────────────────────
 
+def _is_externally_managed() -> bool:
+    """Return True when system Python is PEP 668 managed (Debian 12+, Ubuntu 23.04+)."""
+    import sysconfig
+    stdlib = sysconfig.get_path("stdlib")
+    return bool(stdlib and Path(stdlib, "EXTERNALLY-MANAGED").exists())
+
+
+def _get_python_exe() -> str:
+    """Return posix path to the Python that has the plugin's packages installed."""
+    venv_python = VENV_DIR / ("Scripts/python.exe" if IS_WINDOWS else "bin/python3")
+    if venv_python.exists():
+        return venv_python.as_posix()
+    return Path(sys.executable).as_posix()
+
+
+def _install_into_venv(req_file: Path) -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "venv", str(VENV_DIR)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print_err("Could not create virtual environment:")
+        print_err(result.stderr.strip())
+        print_warn("On Debian/Ubuntu, install the venv package first:")
+        print_warn("  sudo apt install python3-venv")
+        print_warn("Or install dependencies via apt instead:")
+        print_warn("  sudo apt install python3-hidapi python3-yaml python3-pynput")
+        sys.exit(1)
+
+    venv_python = VENV_DIR / ("Scripts/python.exe" if IS_WINDOWS else "bin/python3")
+    result = subprocess.run(
+        [str(venv_python), "-m", "pip", "install", "-r", str(req_file)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print_err("pip install into venv failed:")
+        print_err(result.stderr.strip())
+        sys.exit(1)
+    print_ok(f"Dependencies installed into virtualenv ({VENV_DIR})")
+    print_ok("Hook commands will use the virtualenv Python automatically")
+
+
 def install_deps() -> None:
     print_step("Installing Python dependencies")
     repo_dir = Path(__file__).parent
@@ -88,12 +131,21 @@ def install_deps() -> None:
 
     result = run([sys.executable, "-m", "pip", "install", "-r", str(req_file)],
                  capture=True)
-    if result.returncode != 0:
+    if result.returncode == 0:
+        print_ok("hidapi installed")
+        print_ok("pyyaml installed")
+        print_ok("pynput installed")
+        return
+
+    # PEP 668: Debian 12+, Ubuntu 23.04+ block system-wide pip installs.
+    if _is_externally_managed() or "externally-managed-environment" in result.stderr:
+        print_warn("System Python is externally managed (PEP 668).")
+        print_warn("Creating a virtual environment to hold plugin dependencies...")
+        _install_into_venv(req_file)
+    else:
         print_err("pip install failed:")
-        print(result.stderr)
+        print(result.stderr, file=sys.stderr)
         sys.exit(1)
-    print_ok("hidapi installed")
-    print_ok("pyyaml installed")
 
 
 # ── file install ───────────────────────────────────────────────────────────
@@ -153,7 +205,7 @@ def install_udev() -> None:
 
 def _make_hook_entry(event: str, cmd_arg: str) -> dict:
     # Use forward slashes so the command works correctly when run via bash on Windows.
-    python_exe = Path(sys.executable).as_posix()
+    python_exe = _get_python_exe()
     script_path = (INSTALL_DIR / "patlite.py").as_posix()
     command = f"{python_exe} {script_path} {cmd_arg}"
     return {
@@ -227,7 +279,9 @@ def test_device() -> None:
     try:
         import hid
     except ImportError:
-        print_warn("hidapi not importable — run 'pip install hidapi' and try again")
+        print_warn("hidapi not importable — re-run the installer or install manually:")
+        print_warn("  Debian/Ubuntu: sudo apt install python3-hidapi")
+        print_warn("  Other:         pip install hidapi")
         return
 
     devices = [d for d in hid.enumerate() if d["vendor_id"] == VENDOR_ID]

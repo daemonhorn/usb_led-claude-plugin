@@ -100,7 +100,9 @@ def send_signal(event: str) -> None:
     try:
         import hid
     except ImportError:
-        print("patlite: hidapi not installed. Run: pip install hidapi", file=sys.stderr)
+        print("patlite: hidapi not installed.", file=sys.stderr)
+        print("  Debian/Ubuntu: sudo apt install python3-hidapi", file=sys.stderr)
+        print("  Other:         pip install hidapi", file=sys.stderr)
         sys.exit(1)
 
     try:
@@ -139,12 +141,14 @@ def _pid_alive(pid: int) -> bool:
 def _acquire_lock() -> bool:
     if os.path.exists(_LOCK_FILE):
         try:
-            pid = int(open(_LOCK_FILE).read().strip())
+            with open(_LOCK_FILE) as f:
+                pid = int(f.read().strip())
             if _pid_alive(pid):
                 return False  # another listener already running
         except (ValueError, OSError):
             pass  # stale lock
-    open(_LOCK_FILE, "w").write(str(os.getpid()))
+    with open(_LOCK_FILE, "w") as f:
+        f.write(str(os.getpid()))
     return True
 
 
@@ -162,7 +166,9 @@ def _inject_enter():
         kb.press(Key.enter)
         kb.release(Key.enter)
     except ImportError:
-        print("patlite: pynput not installed. Run: pip install pynput", file=sys.stderr)
+        print("patlite: pynput not installed.", file=sys.stderr)
+        print("  Debian/Ubuntu: sudo apt install python3-pynput", file=sys.stderr)
+        print("  Other:         pip install pynput", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
         print(f"patlite: keystroke injection failed: {e}", file=sys.stderr)
@@ -184,6 +190,7 @@ def touch_listen(timeout_s: int = 30) -> None:
         _release_lock()
         return
 
+    dev = None
     try:
         config = load_config()
         dev = _open_device(config)
@@ -198,16 +205,21 @@ def touch_listen(timeout_s: int = 30) -> None:
             if touched and not last_touched:
                 # Rising edge — close device before injecting so LED writes can reopen it
                 dev.close()
+                dev = None
                 _inject_enter()
                 return
 
             last_touched = touched
             time.sleep(0.1)
 
-        dev.close()
     except Exception:
         pass
     finally:
+        if dev is not None:
+            try:
+                dev.close()
+            except Exception:
+                pass
         _release_lock()
 
 

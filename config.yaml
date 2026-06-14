@@ -1,0 +1,40 @@
+# Patlite NE-WT-USB configuration for Claude Code hooks
+# Edit this file to customize event -> light signal mappings.
+
+device:
+  vid: 0x191A   # Patlite vendor ID
+  pid: null     # null = auto-detect first Patlite device
+
+# Event -> signal mapping
+# Colors: red, amber, yellow, green, blue, cyan, purple, white, off
+# Patterns: solid, flash, flash2, pulse, pulse2, pulse3, pulse4, off
+events:
+  # Claude needs your attention (permission prompt, question)
+  notification:
+    color: amber
+    pattern: flash
+
+  # Claude finished its turn, waiting for your next input
+  stop:
+    color: green
+    pattern: solid
+
+  # You submitted a prompt — Claude is now working
+  working:
+    color: blue
+    pattern: solid
+
+  # Claude is about to execute a tool
+  pre_tool:
+    color: cyan
+    pattern: pulse
+
+  # Claude just finished a tool execution (still working)
+  post_tool:
+    color: blue
+    pattern: solid
+
+  # Explicit off state
+  idle:
+    color: "off"
+    pattern: "off"

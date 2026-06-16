@@ -487,4 +487,4 @@ Or install `python3-venv` and re-run `python3 install.py` to let the installer c
 
 ## License
 
-MIT
+BSD 2-Clause

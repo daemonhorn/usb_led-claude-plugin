@@ -18,7 +18,7 @@ import platform
 import argparse
 from pathlib import Path
 
-PLUGIN_NAME = "patlite"
+PLUGIN_NAME = "usb_led"
 INSTALL_DIR = Path.home() / ".claude" / "plugins" / PLUGIN_NAME
 VENV_DIR = INSTALL_DIR / ".venv"
 SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
@@ -155,19 +155,25 @@ def install_deps() -> None:
 
 # ── file install ───────────────────────────────────────────────────────────
 
-def install_files() -> None:
+def install_files(detected_driver: "str | None" = None) -> None:
     print_step(f"Installing plugin files → {INSTALL_DIR}")
     INSTALL_DIR.mkdir(parents=True, exist_ok=True)
 
     repo_dir = Path(__file__).parent
-    for fname in ("patlite.py", "config.yaml"):
+    for fname in ("usb_led.py", "config.yaml"):
         src = repo_dir / fname
         dst = INSTALL_DIR / fname
         if dst.exists() and fname == "config.yaml":
             print_warn(f"config.yaml already exists at {dst} — skipping (your settings preserved)")
             continue
-        shutil.copy2(src, dst)
-        print_ok(f"Copied {fname}")
+        if fname == "config.yaml" and detected_driver and detected_driver != "patlite":
+            content = src.read_text()
+            content = content.replace("  driver: patlite", f"  driver: {detected_driver}")
+            dst.write_text(content)
+            print_ok(f"Wrote config.yaml (driver: {detected_driver} — auto-detected)")
+        else:
+            shutil.copy2(src, dst)
+            print_ok(f"Copied {fname}")
 
 
 # ── udev rules (Linux) ─────────────────────────────────────────────────────
@@ -240,9 +246,25 @@ def _make_hook_entry(event: str, cmd_arg: str) -> dict:
 def _hook_already_present(entries: list) -> bool:
     for entry in entries:
         for hook in entry.get("hooks", []):
-            if "patlite.py" in hook.get("command", ""):
+            cmd = hook.get("command", "")
+            if "usb_led.py" in cmd or "patlite.py" in cmd:
                 return True
     return False
+
+
+def _remove_old_hooks(hooks: dict) -> int:
+    """Remove any hooks referencing the old patlite.py script name. Returns count removed."""
+    removed = 0
+    for event in list(HOOK_EVENTS):
+        entries = hooks.get(event, [])
+        before = len(entries)
+        entries[:] = [
+            e for e in entries
+            if not any("patlite.py" in h.get("command", "") for h in e.get("hooks", []))
+        ]
+        hooks[event] = entries
+        removed += before - len(entries)
+    return removed
 
 
 def update_settings() -> None:
@@ -260,6 +282,12 @@ def update_settings() -> None:
             sys.exit(1)
 
     hooks = settings.setdefault("hooks", {})
+
+    # Migrate hooks from old patlite.py script name if present
+    migrated = _remove_old_hooks(hooks)
+    if migrated:
+        print_ok(f"Migrated {migrated} hooks from patlite.py → usb_led.py")
+
     added = 0
     skipped = 0
 
@@ -314,6 +342,9 @@ def _get_hid():
                     def write(self__, data): self__._d.write(bytes(data[1:]), report_id=bytes([data[0]]))
                     def send_feature_report(self__, data):
                         self__._d.send_feature_report(bytes(data[1:]), report_id=bytes([data[0]]))
+                    def get_feature_report(self__, report_id, length):
+                        result = self__._d.get_feature_report(bytes([report_id]), length)
+                        return [report_id] + list(result) if result is not None else []
                     def read(self__, n, timeout_ms=0):
                         r = self__._d.read(n, timeout_ms=timeout_ms)
                         return list(r) if r is not None else []
@@ -324,6 +355,18 @@ def _get_hid():
         return _Facade()
     except ImportError:
         return None
+
+
+def detect_device() -> "str | None":
+    """Return the driver name of the first detected supported device, or None."""
+    hid = _get_hid()
+    if hid is None:
+        return None
+    connected = {(d["vendor_id"], d["product_id"]) for d in hid.enumerate()}
+    for family in DEVICE_FAMILIES:
+        if (family["vid"], family["pid"]) in connected:
+            return family["driver"]
+    return None
 
 
 def _test_patlite(hid, vid, pid, label) -> None:
@@ -404,7 +447,7 @@ def test_device() -> None:
 # ── uninstall ──────────────────────────────────────────────────────────────
 
 def uninstall() -> None:
-    print_step("Uninstalling Patlite Claude Code plugin")
+    print_step("Uninstalling USB LED Claude Code plugin")
 
     # Remove hooks from settings.json
     if SETTINGS_PATH.exists():
@@ -443,7 +486,7 @@ def uninstall() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Patlite NE-USB + Claude Code installer"
+        description="USB LED / signal light Claude Code hook installer"
     )
     parser.add_argument("--uninstall", action="store_true", help="Remove plugin and hooks")
     parser.add_argument("--test", action="store_true", help="Test device only")
@@ -466,7 +509,8 @@ def main() -> None:
     check_claude_config()
 
     install_deps()
-    install_files()
+    detected_driver = detect_device()
+    install_files(detected_driver)
 
     if IS_LINUX:
         install_udev()
@@ -479,7 +523,7 @@ def main() -> None:
     print("║  Installation complete!                      ║")
     print("║                                              ║")
     print("║  Restart Claude Code to activate hooks.      ║")
-    print("║  Edit ~/.claude/plugins/patlite/config.yaml  ║")
+    print("║  Edit ~/.claude/plugins/usb_led/config.yaml  ║")
     print("║  to customize colors and patterns.           ║")
     print("╚══════════════════════════════════════════════╝")
 

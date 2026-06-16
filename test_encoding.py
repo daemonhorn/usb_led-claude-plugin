@@ -8,7 +8,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(__file__))
-from patlite import (
+from usb_led import (
     build_led_byte, build_buzzer_bytes,
     _send_patlite, _send_luxafor, _blink1_write_pattern, _send_blink1,
     RGB_COLORS,

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Patlite NE-USB controller for Claude Code hooks.
-Usage: python patlite.py <event>
+USB LED / signal light controller for Claude Code hooks.
+Usage: python usb_led.py <event>
 Events: notification, stop, working, pre_tool, post_tool, idle, off
         touch_listen [--timeout N]   (background touch-to-approve daemon)
+Supported drivers: patlite | luxafor | blink1  (set via config.yaml device.driver)
 """
 import sys
 import os
@@ -12,8 +13,6 @@ import time
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.yaml")
-
-VENDOR_ID = 0x191A  # Patlite default VID (kept for backward compat)
 
 # LED byte for Patlite: upper nibble = color, lower nibble = pattern
 COLORS = {
@@ -78,9 +77,9 @@ DRIVER_DEFAULTS = {
 _GETSTATE_CMD = [0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
 
 # Lock file prevents multiple simultaneous touch listeners.
-_LOCK_FILE = os.path.join(tempfile.gettempdir(), "patlite_touch_listen.pid")
+_LOCK_FILE = os.path.join(tempfile.gettempdir(), "usb_led_touch_listen.pid")
 # Cancel sentinel: written by any hook event that means "the prompt is gone".
-_CANCEL_FILE = os.path.join(tempfile.gettempdir(), "patlite_touch_cancel")
+_CANCEL_FILE = os.path.join(tempfile.gettempdir(), "usb_led_touch_cancel")
 
 
 # ── HID compatibility layer ──────────────────────────────────────────────────
@@ -165,7 +164,7 @@ def load_config():
         with open(CONFIG_PATH) as f:
             return yaml.safe_load(f)
     except Exception as e:
-        print(f"patlite: failed to load config: {e}", file=sys.stderr)
+        print(f"usb_led: failed to load config: {e}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -233,7 +232,7 @@ def _send_luxafor(dev, color_name, pattern_name):
     r, g, b = RGB_COLORS.get(str(color_name).lower(), (0, 0, 0))
     pat = str(pattern_name).lower()
 
-    if pat == "off" or color_name == "off":
+    if pat == "off" or str(color_name).lower() == "off":
         dev.write([0x00, 0x01, 0xFF, 0, 0, 0, 0, 0, 0])
     elif pat in ("flash", "flash2"):
         speed = 8 if pat == "flash" else 24
@@ -288,7 +287,7 @@ def _send_blink1(dev, color_name, pattern_name):
     r, g, b = RGB_COLORS.get(str(color_name).lower(), (0, 0, 0))
     pat = str(pattern_name).lower()
 
-    if pat == "off" or color_name == "off":
+    if pat == "off" or str(color_name).lower() == "off":
         dev.send_feature_report([0x01, 0x70, 0, 0, 0, 0, 0, 0])   # stop pattern
         dev.send_feature_report([0x01, 0x6e, 0, 0, 0, 0, 0, 0])   # fade to off
         return
@@ -316,6 +315,11 @@ def _blink1_off(dev):
 
 # ── device open ──────────────────────────────────────────────────────────────
 
+def _parse_vid_pid(raw) -> int:
+    """Parse a VID/PID value that may be an int or a hex string like '0x191A'."""
+    return int(str(raw), 16) if isinstance(raw, str) else int(raw)
+
+
 def _open_device(config):
     """Open and return the HID device, resolving VID/PID from config or driver defaults."""
     hid = _get_hid()
@@ -323,18 +327,17 @@ def _open_device(config):
     driver = str(device_cfg.get("driver", "patlite")).lower()
     defaults = DRIVER_DEFAULTS.get(driver, DRIVER_DEFAULTS["patlite"])
 
-    vid_raw = device_cfg.get("vid", defaults["vid"])
-    vid = int(str(vid_raw), 16) if isinstance(vid_raw, str) else int(vid_raw)
+    vid = _parse_vid_pid(device_cfg.get("vid", defaults["vid"]))
 
     pid_raw = device_cfg.get("pid", defaults["pid"])
     if pid_raw is None:
         found = [d for d in hid.enumerate() if d["vendor_id"] == vid]
         if not found:
-            print(f"patlite: no device found (VID={hex(vid)})", file=sys.stderr)
+            print(f"usb_led: no device found (VID={hex(vid)})", file=sys.stderr)
             sys.exit(1)
         pid = found[0]["product_id"]
     else:
-        pid = int(str(pid_raw), 16) if isinstance(pid_raw, str) else int(pid_raw)
+        pid = _parse_vid_pid(pid_raw)
 
     dev = hid.device()
     dev.open(vid, pid)
@@ -348,11 +351,11 @@ def send_signal(event: str) -> None:
 
     event_cfg = config.get("events", {}).get(event)
     if event_cfg is None:
-        print(f"patlite: unknown event '{event}'", file=sys.stderr)
+        print(f"usb_led: unknown event '{event}'", file=sys.stderr)
         sys.exit(1)
 
     if _get_hid() is None:
-        print("patlite: hidapi not installed.", file=sys.stderr)
+        print("usb_led: hidapi not installed.", file=sys.stderr)
         print("  Debian/Ubuntu: sudo apt install python3-hidapi", file=sys.stderr)
         print("  Other:         pip install hidapi", file=sys.stderr)
         sys.exit(1)
@@ -369,7 +372,7 @@ def send_signal(event: str) -> None:
             _send_patlite(dev, event_cfg)
         dev.close()
     except Exception as e:
-        print(f"patlite: device error: {e}", file=sys.stderr)
+        print(f"usb_led: device error: {e}", file=sys.stderr)
         sys.exit(1)
 
     # Touch sensor is Patlite-only (NE-WT-USB / NE-ST-USB).
@@ -585,12 +588,12 @@ def _pynput_inject() -> None:
         kb.press(Key.enter)
         kb.release(Key.enter)
     except ImportError:
-        print("patlite: pynput not installed.", file=sys.stderr)
+        print("usb_led: pynput not installed.", file=sys.stderr)
         print("  Debian/Ubuntu: sudo apt install python3-pynput", file=sys.stderr)
         print("  Other:         pip install pynput", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
-        print(f"patlite: keystroke injection failed: {e}", file=sys.stderr)
+        print(f"usb_led: keystroke injection failed: {e}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -703,7 +706,7 @@ def _spawn_touch_listener(config: dict) -> None:
         else:
             subprocess.Popen(cmd, start_new_session=True, close_fds=True)
     except Exception as e:
-        print(f"patlite: could not start touch listener: {e}", file=sys.stderr)
+        print(f"usb_led: could not start touch listener: {e}", file=sys.stderr)
 
 
 # ── main ────────────────────────────────────────────────────────────────────
@@ -745,19 +748,21 @@ def main():
         if hid is not None:
             device_cfg = cfg.get("device", {})
             defaults = DRIVER_DEFAULTS.get(driver, DRIVER_DEFAULTS["patlite"])
-            vid_raw = device_cfg.get("vid", defaults["vid"])
-            vid = int(str(vid_raw), 16) if isinstance(vid_raw, str) else int(vid_raw)
+            vid = _parse_vid_pid(device_cfg.get("vid", defaults["vid"]))
             found = [d for d in hid.enumerate() if d["vendor_id"] == vid]
             if found:
-                dev = hid.device()
-                dev.open(vid, found[0]["product_id"])
-                if driver == "luxafor":
-                    _luxafor_off(dev)
-                elif driver == "blink1":
-                    _blink1_off(dev)
-                else:
-                    dev.write([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
-                dev.close()
+                try:
+                    dev = hid.device()
+                    dev.open(vid, found[0]["product_id"])
+                    if driver == "luxafor":
+                        _luxafor_off(dev)
+                    elif driver == "blink1":
+                        _blink1_off(dev)
+                    else:
+                        dev.write([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+                    dev.close()
+                except Exception as e:
+                    print(f"usb_led: device error: {e}", file=sys.stderr)
         return
 
     send_signal(event)
